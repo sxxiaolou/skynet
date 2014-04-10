@@ -58,6 +58,7 @@ struct socket_server {
 	struct event ev[MAX_EVENT];
 	struct socket slot[MAX_SOCKET];
 	char buffer[MAX_INFO];
+	fd_set rfds;
 };
 
 struct request_open {
@@ -126,7 +127,7 @@ socket_keepalive(int fd) {
 }
 
 static int
-reverve_id(struct socket_server *ss) {
+reserve_id(struct socket_server *ss) {
 	int i;
 	for (i=0;i<MAX_SOCKET;i++) {
 		int id = __sync_add_and_fetch(&(ss->alloc_id), 1);
@@ -184,6 +185,8 @@ socket_server_create() {
 	ss->alloc_id = 0;
 	ss->event_n = 0;
 	ss->event_index = 0;
+	FD_ZERO(&ss->rfds);
+	assert(ss->recvctrl_fd < FD_SETSIZE);
 
 	return ss;
 }
@@ -510,6 +513,10 @@ start_socket(struct socket_server *ss, struct request_start *request, struct soc
 		s->opaque = request->opaque;
 		result->data = "start";
 		return SOCKET_OPEN;
+	} else if (s->type == SOCKET_TYPE_CONNECTED) {
+		s->opaque = request->opaque;
+		result->data = "transfer";
+		return SOCKET_OPEN;
 	}
 	return -1;
 }
@@ -532,14 +539,12 @@ block_readpipe(int pipefd, void *buffer, int sz) {
 
 static int
 has_cmd(struct socket_server *ss) {
-	fd_set rfds;
 	struct timeval tv = {0,0};
 	int retval;
 
-	FD_ZERO(&rfds);
-	FD_SET(ss->recvctrl_fd, &rfds);
+	FD_SET(ss->recvctrl_fd, &ss->rfds);
 
-	retval = select(ss->recvctrl_fd+1, &rfds, NULL, NULL, &tv);
+	retval = select(ss->recvctrl_fd+1, &ss->rfds, NULL, NULL, &tv);
 	if (retval == 1) {
 		return 1;
 	}
@@ -668,7 +673,7 @@ report_accept(struct socket_server *ss, struct socket *s, struct socket_message 
 	if (client_fd < 0) {
 		return 0;
 	}
-	int id = reverve_id(ss);
+	int id = reserve_id(ss);
 	if (id < 0) {
 		close(client_fd);
 		return 0;
@@ -781,7 +786,7 @@ open_request(struct socket_server *ss, struct request_package *req, uintptr_t op
 		fprintf(stderr, "socket-server : Invalid addr %s.\n",addr);
 		return 0;
 	}
-	int id = reverve_id(ss);
+	int id = reserve_id(ss);
 	req->u.open.opaque = opaque;
 	req->u.open.id = id;
 	req->u.open.port = port;
@@ -885,7 +890,7 @@ socket_server_listen(struct socket_server *ss, uintptr_t opaque, const char * ad
 		return -1;
 	}
 	struct request_package request;
-	int id = reverve_id(ss);
+	int id = reserve_id(ss);
 	request.u.listen.opaque = opaque;
 	request.u.listen.id = id;
 	request.u.listen.fd = fd;
@@ -896,7 +901,7 @@ socket_server_listen(struct socket_server *ss, uintptr_t opaque, const char * ad
 int
 socket_server_bind(struct socket_server *ss, uintptr_t opaque, int fd) {
 	struct request_package request;
-	int id = reverve_id(ss);
+	int id = reserve_id(ss);
 	request.u.bind.opaque = opaque;
 	request.u.bind.id = id;
 	request.u.bind.fd = fd;
