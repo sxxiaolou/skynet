@@ -256,13 +256,13 @@ append_key(struct bson *bs, int type, const char *key, size_t sz) {
 
 static void
 append_number(struct bson *bs, lua_State *L, const char *key, size_t sz) {
-	lua_Integer i = lua_tointeger(L, -1);
+	int64_t i = lua_tointeger(L, -1);
 	lua_Number d = lua_tonumber(L,-1);
 	if (i != d) {
 		append_key(bs, BSON_REAL, key, sz);
 		write_double(bs, d);
 	} else {
-		int si = (int64_t)i >> 32;
+		int si = i >> 31;
 		if (si == 0 || si == -1) {
 			append_key(bs, BSON_INT32, key, sz);
 			write_int32(bs, i);
@@ -457,7 +457,7 @@ pack_dict(lua_State *L, struct bson *b, bool isarray) {
 }
 
 static void
-pack_sorted_dict(lua_State *L, struct bson *b, int n) {
+pack_ordered_dict(lua_State *L, struct bson *b, int n) {
 	int length = reserve_length(b);
 	int i;
 	for (i=0;i<n;i+=2) {
@@ -863,7 +863,7 @@ lencode_order(lua_State *L) {
 	if (n%2 != 0) {
 		return luaL_error(L, "Invalid ordered dict");
 	}
-	pack_sorted_dict(L, &b, n);
+	pack_ordered_dict(L, &b, n);
 	lua_settop(L,1);
 	void * ud = lua_newuserdata(L, b.size);
 	memcpy(ud, b.ptr, b.size);
@@ -1188,3 +1188,4 @@ luaopen_bson(lua_State *L) {
 
 	return 1;
 }
+
