@@ -52,6 +52,7 @@ struct skynet_context {
 
 struct skynet_node {
 	int total;
+	int init;
 	uint32_t monitor_exit;
 	pthread_key_t handle_key;
 };
@@ -75,8 +76,13 @@ context_dec() {
 
 uint32_t 
 skynet_current_handle(void) {
-	void * handle = pthread_getspecific(G_NODE.handle_key);
-	return (uint32_t)(uintptr_t)handle;
+	if (G_NODE.init) {
+		void * handle = pthread_getspecific(G_NODE.handle_key);
+		return (uint32_t)(uintptr_t)handle;
+	} else {
+		uintptr_t v = (uint32_t)(-THREAD_MAIN);
+		return v;
+	}
 }
 
 static void
@@ -139,7 +145,7 @@ skynet_context_new(const char * name, const char *param) {
 		if (ret) {
 			ctx->init = true;
 		}
-		skynet_mq_force_push(queue);
+		skynet_globalmq_push(queue);
 		if (ret) {
 			skynet_error(ret, "LAUNCH %s %s", name, param ? param : "");
 		}
@@ -228,11 +234,23 @@ _dispatch_message(struct skynet_context *ctx, struct skynet_message *msg) {
 	CHECKCALLING_END(ctx)
 }
 
-int
-skynet_context_message_dispatch(struct skynet_monitor *sm) {
-	struct message_queue * q = skynet_globalmq_pop();
-	if (q==NULL)
-		return 1;
+void 
+skynet_context_dispatchall(struct skynet_context * ctx) {
+	// for skynet_error
+	struct skynet_message msg;
+	struct message_queue *q = ctx->queue;
+	while (!skynet_mq_pop(q,&msg)) {
+		_dispatch_message(ctx, &msg);
+	}
+}
+
+struct message_queue * 
+skynet_context_message_dispatch(struct skynet_monitor *sm, struct message_queue *q) {
+	if (q == NULL) {
+		q = skynet_globalmq_pop();
+		if (q==NULL)
+			return NULL;
+	}
 
 	uint32_t handle = skynet_mq_handle(q);
 
@@ -240,13 +258,13 @@ skynet_context_message_dispatch(struct skynet_monitor *sm) {
 	if (ctx == NULL) {
 		struct drop_t d = { handle };
 		skynet_mq_release(q, drop_message, &d);
-		return 0;
+		return skynet_globalmq_pop();
 	}
 
 	struct skynet_message msg;
 	if (skynet_mq_pop(q,&msg)) {
 		skynet_context_release(ctx);
-		return 0;
+		return skynet_globalmq_pop();
 	}
 
 	skynet_monitor_trigger(sm, msg.source , handle);
@@ -258,12 +276,18 @@ skynet_context_message_dispatch(struct skynet_monitor *sm) {
 	}
 
 	assert(q == ctx->queue);
-	skynet_mq_pushglobal(q);
+	struct message_queue *nq = skynet_globalmq_pop();
+	if (nq) {
+		// If global mq is not empty , push q back, and return next queue (nq)
+		// Else (global mq is empty or block, don't push q back, and return q again (for next dispatch)
+		skynet_globalmq_push(q);
+		q = nq;
+	} 
 	skynet_context_release(ctx);
 
 	skynet_monitor_trigger(sm, 0,0);
 
-	return 0;
+	return q;
 }
 
 static void
@@ -328,11 +352,7 @@ cmd_reg(struct skynet_context * context, const char * param) {
 	} else if (param[0] == '.') {
 		return skynet_handle_namehandle(context->handle, param + 1);
 	} else {
-		assert(context->handle!=0);
-		struct remote_name *rname = skynet_malloc(sizeof(*rname));
-		copy_name(rname->name, param);
-		rname->handle = context->handle;
-		skynet_harbor_register(rname);
+		skynet_error(context, "Can't register global name %s in C", param);
 		return NULL;
 	}
 }
@@ -363,10 +383,7 @@ cmd_name(struct skynet_context * context, const char * param) {
 	if (name[0] == '.') {
 		return skynet_handle_namehandle(handle_id, name + 1);
 	} else {
-		struct remote_name *rname = skynet_malloc(sizeof(*rname));
-		copy_name(rname->name, name);
-		rname->handle = handle_id;
-		skynet_harbor_register(rname);
+		skynet_error(context, "Can't set global name %s in C", name);
 	}
 	return NULL;
 }
@@ -545,12 +562,16 @@ _filter_args(struct skynet_context * context, int type, int *session, void ** da
 		*data = msg;
 	}
 
-	assert((*sz & HANDLE_MASK) == *sz);
 	*sz |= type << HANDLE_REMOTE_SHIFT;
 }
 
 int
 skynet_send(struct skynet_context * context, uint32_t source, uint32_t destination , int type, int session, void * data, size_t sz) {
+	if ((sz & HANDLE_MASK) != sz) {
+		skynet_error(context, "The message to %x is too large (sz = %lu)", destination, sz);
+		skynet_free(data);
+		return -1;
+	}
 	_filter_args(context, type, &session, (void **)&data, &sz);
 
 	if (source == 0) {
@@ -642,6 +663,7 @@ void
 skynet_globalinit(void) {
 	G_NODE.total = 0;
 	G_NODE.monitor_exit = 0;
+	G_NODE.init = 1;
 	if (pthread_key_create(&G_NODE.handle_key, NULL)) {
 		fprintf(stderr, "pthread_key_create failed");
 		exit(1);

@@ -7,6 +7,7 @@
 #include "skynet_timer.h"
 #include "skynet_monitor.h"
 #include "skynet_socket.h"
+#include "skynet_daemon.h"
 
 #include <pthread.h>
 #include <unistd.h>
@@ -120,8 +121,10 @@ _worker(void *p) {
 	struct monitor *m = wp->m;
 	struct skynet_monitor *sm = m->m[id];
 	skynet_initthread(THREAD_WORKER);
+	struct message_queue * q = NULL;
 	for (;;) {
-		if (skynet_context_message_dispatch(sm)) {
+		q = skynet_context_message_dispatch(sm, q);
+		if (q == NULL) {
 			CHECK_ABORT
 			if (pthread_mutex_lock(&m->mutex) == 0) {
 				++ m->sleep;
@@ -181,7 +184,7 @@ _start(int thread) {
 }
 
 static void
-bootstrap(const char * cmdline) {
+bootstrap(struct skynet_context * logger, const char * cmdline) {
 	int sz = strlen(cmdline);
 	char name[sz+1];
 	char args[sz+1];
@@ -189,12 +192,18 @@ bootstrap(const char * cmdline) {
 	struct skynet_context *ctx = skynet_context_new(name, args);
 	if (ctx == NULL) {
 		skynet_error(NULL, "Bootstrap error : %s\n", cmdline);
+		skynet_context_dispatchall(logger);
 		exit(1);
 	}
 }
 
 void 
 skynet_start(struct skynet_config * config) {
+	if (config->daemon) {
+		if (daemon_init(config->daemon)) {
+			exit(1);
+		}
+	}
 	skynet_harbor_init(config->harbor);
 	skynet_handle_init(config->harbor);
 	skynet_mq_init();
@@ -202,8 +211,17 @@ skynet_start(struct skynet_config * config) {
 	skynet_timer_init();
 	skynet_socket_init();
 
-	bootstrap(config->bootstrap);
+	struct skynet_context *ctx = skynet_context_new("logger", config->logger);
+	if (ctx == NULL) {
+		fprintf(stderr, "Can't launch logger service\n");
+		exit(1);
+	}
+
+	bootstrap(ctx, config->bootstrap);
 
 	_start(config->thread);
 	skynet_socket_free();
+	if (config->daemon) {
+		daemon_exit(config->daemon);
+	}
 }
